@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Genie</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Genie">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#12141c">
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --text: #15171c; --muted: #636875; --accent: #0a84ff; --ok: #1f9d55; --warn: #c2410c; --line: #e2e4ea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #12141c; --card: #1c1f29; --text: #eef0f5; --muted: #9aa0ad; --accent: #59d9ff; --ok: #4ade80; --warn: #fb923c; --line: #2b2f3b; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 17px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    padding: max(24px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
+  }
+  main { max-width: 480px; margin: 0 auto; }
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+  header img { width: 48px; height: 48px; border-radius: 11px; }
+  h1 { font-size: 24px; margin: 0; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin-bottom: 14px; }
+  .card h2 { font-size: 15px; margin: 0 0 8px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  p { margin: 0 0 10px; }
+  p:last-child { margin-bottom: 0; }
+  .muted { color: var(--muted); font-size: 15px; }
+  .status { font-weight: 600; }
+  .status.ok { color: var(--ok); }
+  .status.warn { color: var(--warn); }
+  textarea {
+    width: 100%; min-height: 72px; font: 14px/1.35 ui-monospace, Menlo, monospace; color: var(--text); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 10px; padding: 10px; resize: vertical; word-break: break-all;
+  }
+  button {
+    appearance: none; border: 0; border-radius: 12px; padding: 13px 16px; font: 600 17px -apple-system, system-ui, sans-serif;
+    background: var(--accent); color: #fff; width: 100%; margin-top: 10px;
+  }
+  @media (prefers-color-scheme: dark) { button { color: #0b1220; } }
+  button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+  button:disabled { opacity: .45; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <img src="icon-180.png" alt="">
+    <div>
+      <h1>Genie</h1>
+      <div id="status" class="status">Checking…</div>
+    </div>
+  </header>
+
+  <section id="install" class="card" hidden>
+    <h2>Add to Home Screen</h2>
+    <p>iPhone only delivers notifications to web apps on the Home Screen.</p>
+    <p>In Safari, tap <strong>Share</strong>, then <strong>Add to Home Screen</strong>. Open Genie from its new icon to continue.</p>
+  </section>
+
+  <section id="unsupported" class="card" hidden>
+    <h2>Not supported</h2>
+    <p>This browser can't receive web push notifications. Use Safari on iOS 16.4 or later, and open the page from the Home Screen.</p>
+  </section>
+
+  <section id="setup" class="card" hidden>
+    <h2>1 · Setup code</h2>
+    <p class="muted">On the Mac: Genie Settings ▸ Phone ▸ Copy Setup Code. Then paste it here.</p>
+    <textarea id="setupCode" placeholder="Paste the setup code" autocapitalize="off" autocomplete="off" spellcheck="false"></textarea>
+    <button id="enable" disabled>Enable Notifications</button>
+  </section>
+
+  <section id="reply" class="card" hidden>
+    <h2>2 · Reply code</h2>
+    <p class="muted">Copy this and paste it into Genie Settings ▸ Phone ▸ Connect.</p>
+    <textarea id="replyCode" readonly></textarea>
+    <button id="copy">Copy Reply Code</button>
+    <button id="reset" class="secondary">Set Up Again</button>
+  </section>
+
+  <p class="muted">Genie sends notifications straight from your Mac through Apple's push service. Nothing is stored on this site.</p>
+</main>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const show = (id, on = true) => { $(id).hidden = !on; };
+  const setStatus = (text, kind = '') => { $('status').textContent = text; $('status').className = 'status ' + kind; };
+
+  const base64url = (text) => btoa(text).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const keyBytes = (code) => {
+    const b64 = code.trim().replace(/-/g, '+').replace(/_/g, '/');
+    const raw = atob(b64 + '='.repeat((4 - b64.length % 4) % 4));
+    const bytes = Uint8Array.from(raw, (c) => c.charCodeAt(0));
+    if (bytes.length !== 65 || bytes[0] !== 4) throw new Error('That isn’t a Genie setup code.');
+    return bytes;
+  };
+  const replyCodeFor = (subscription) => base64url(JSON.stringify(subscription.toJSON()));
+
+  const standalone = navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
+  const supported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  let registration;
+
+  async function start() {
+    if (!standalone && /iPhone|iPad|iPod/.test(navigator.userAgent)) {
+      setStatus('Not on the Home Screen yet', 'warn');
+      show('install');
+      return;
+    }
+    if (!supported) {
+      setStatus('Not supported here', 'warn');
+      show('unsupported');
+      return;
+    }
+    registration = await navigator.serviceWorker.register('sw.js', { scope: './' });
+    await navigator.serviceWorker.ready;
+    const existing = await registration.pushManager.getSubscription();
+    if (existing && Notification.permission === 'granted') {
+      showReply(existing);
+    } else {
+      showSetup();
+    }
+  }
+
+  function showSetup() {
+    setStatus(Notification.permission === 'denied' ? 'Notifications are turned off for Genie in Settings' : 'Not connected',
+              'warn');
+    show('setup');
+    show('reply', false);
+  }
+
+  function showReply(subscription) {
+    setStatus('Subscribed. Notifications will arrive here', 'ok');
+    $('replyCode').value = replyCodeFor(subscription);
+    show('setup', false);
+    show('reply');
+  }
+
+  $('setupCode').addEventListener('input', () => {
+    $('enable').disabled = $('setupCode').value.trim().length < 80;
+  });
+
+  $('enable').addEventListener('click', async () => {
+    $('enable').disabled = true;
+    try {
+      const key = keyBytes($('setupCode').value);
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') throw new Error('Notifications weren’t allowed. Turn them on in Settings ▸ Notifications ▸ Genie.');
+      const old = await registration.pushManager.getSubscription();
+      if (old) await old.unsubscribe();
+      const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+      showReply(subscription);
+    } catch (error) {
+      setStatus(error.message || String(error), 'warn');
+      $('enable').disabled = false;
+    }
+  });
+
+  $('copy').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText($('replyCode').value);
+      $('copy').textContent = 'Copied';
+    } catch {
+      $('replyCode').select();
+      $('copy').textContent = 'Select and copy the code above';
+    }
+    setTimeout(() => { $('copy').textContent = 'Copy Reply Code'; }, 2500);
+  });
+
+  $('reset').addEventListener('click', async () => {
+    const old = await registration.pushManager.getSubscription();
+    if (old) await old.unsubscribe();
+    $('setupCode').value = '';
+    $('enable').disabled = true;
+    showSetup();
+  });
+
+  start().catch((error) => setStatus(error.message || String(error), 'warn'));
+})();
+</script>
+</body>
+</html>
